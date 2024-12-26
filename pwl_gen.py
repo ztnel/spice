@@ -29,8 +29,8 @@ class PWMEngine:
     v_initial: float = 0.0 # V
     v_on: float = 5.0 # V
     v_off: float = 5.0 # V
-    t_rise: float = 0.0 # s
-    t_fall: float = 0.0 # s
+    t_rise: float = 1e-8 # s
+    t_fall: float = 1e-8 # s
     f_sw: float = 1.0 # Hz
     f_clk: float = 100e6 # Hz -> MCU speed dictates resultion of switching
     deadtime: float = 0.0
@@ -44,26 +44,15 @@ class PWLConfig:
     duration: float # s
     pwm: PWMEngine
 
-def cycle_update(cumulative: float, high_cycle: bool) -> float:
-    order = ['rise', 'on', 'fall', 'off']
-    cumulative += t_rise
-    pwl_out[idx][0] = round(cumulative, 9)
-    pwl_out[idx][1] = round(v_off if alt else v_on, 2)
-    cumulative += t_on
-    pwl_out[idx+1][0] = round(cumulative, 9)
-    pwl_out[idx+1][1] = round(v_on if alt else v_off, 2)
-    cumulative += t_fall
-    pwl_out[idx+2][0] = round(cumulative, 9)
-    pwl_out[idx+2][1] = round(v_on if alt else v_off, 2)
-    cumulative += t_off
-    pwl_out[idx+3][0] = round(cumulative, 9)
-    pwl_out[idx+3][1] = round(v_on if alt else v_off, 2)
-
 def pwl_run(pwl_config: PWLConfig):
     # init channels
     t_sw = 1 / pwl_config.pwm.f_sw
     t_on = t_sw * pwl_config.pwm.duty
     t_off = t_sw * (1 - pwl_config.pwm.duty)
+    t_on_a = t_on - pwl_config.pwm.t_fall
+    t_off_a = t_off - pwl_config.pwm.t_rise
+    wave_segments = [t_on_a, pwl_config.pwm.t_fall, t_off_a, pwl_config.pwm.t_rise]
+    _logger.info("Wave Segments: %s", wave_segments)
     timesteps = int(pwl_config.duration / t_sw)
     for channel in range(pwl_config.pwm.channels):
         pwl_out = np.array(np.zeros(shape=[timesteps, 2]), dtype=np.float32)
@@ -71,17 +60,25 @@ def pwl_run(pwl_config: PWLConfig):
         pwl_out[0][1] = pwl_config.pwm.v_initial
         cumulative = 0
         _logger.info("Timesteps: %s", timesteps)
-        t_rise = pwl_config.pwm.t_rise if parity else pwl_config.pwm.t_fall
-        t_fall = pwl_config.pwm.t_fall if parity else pwl_config.pwm.t_rise
-        v_on = pwl_config.pwm.v_on if parity else pwl_config.pwm.v_off
-        t_on = t_on if parity else t_off
-        v_off = pwl_config.pwm.v_off if parity else pwl_config.pwm.v_on
-        t_off = t_off if parity else t_on
-        for idx in range(1, timesteps, 4):
-            is_high = idx % 2 if pwl_config.pwm.v_initial == pwl_config.pwm.v_off else not idx % 2
-            cumulative = update_high_cycle() if is_high else update_low_cycle()
-
-            _logger.info("cumulative: %s", cumulative)
+        for i in range(1, timesteps, 4):
+            # build waveform segments
+            for j, segment in enumerate(wave_segments):
+                if j == 0:
+                    v = pwl_config.pwm.v_on
+                elif j == 1:
+                    v = pwl_config.pwm.v_off
+                elif j == 2:
+                    v = pwl_config.pwm.v_off
+                else:
+                    v = pwl_config.pwm.v_on
+                # accumulate time count
+                cumulative += segment 
+                if i+j > timesteps -1:
+                    break
+                # populate entry
+                pwl_out[i+j][0] = round(cumulative, 9)
+                pwl_out[i+j][1] = round(v, 2)
+                _logger.info(f"{pwl_out[i+j][0]},{pwl_out[i+j][1]}")
         # write to channels
         np.savetxt(f'{pwl_config.name}_ch{channel}.pwl', pwl_out, delimiter=",")
 
@@ -108,7 +105,7 @@ if __name__ == '__main__':
             modulation=Fixed(
                 value=0.5
             ),
-            v_initial=5,
+            v_initial=0,
             v_on=5,
             v_off=0,
             f_sw=1e5,
